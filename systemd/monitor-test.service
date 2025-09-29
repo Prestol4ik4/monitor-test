@@ -1,0 +1,8 @@
+[Unit]
+Description=One-shot monitor for process "test"
+Wants=monitor-test.timer
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/monitor_test.sh
+Nice=10
