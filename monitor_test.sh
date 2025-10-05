@@ -1,63 +1,46 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
+#Настройки
 PROCESS_NAME="test"
-API_URL="https://test.com/monitoring/test/api"
 LOG_FILE="/var/log/monitoring.log"
-STATE_DIR="/var/lib/monitoring"
-STATE_PID_FILE="$STATE_DIR/${PROCESS_NAME}.pid"
-LOCKFILE="/var/lock/monitor_${PROCESS_NAME}.lock"
-CURL_TIMEOUT=10
+STATE_FILE="/var/lib/monitoring/state.pid"
+URL="https://test.com/monitoring/test/api"
 
-log() {
-  local lvl="$1"; shift
-  local msg="$*"
-  local ts
-  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  echo "${ts} ${lvl} ${msg}" >> "$LOG_FILE"
-}
+#Безопасные права
+#Только владелец может читать и писать
+umask 077
 
-# создаём каталог для стейта
-mkdir -p "$STATE_DIR"
+#Подготовка каталогов и файлов
+mkdir -p /var/lib/monitoring
 
-# создаём лог, если его нет
-touch "$LOG_FILE"
+# Создаём файлы, если их нет
+touch "$LOG_FILE" "$STATE_FILE"
 
-# блокировка — чтобы не запускался второй экземпляр одновременно
-exec 9>"$LOCKFILE" 2>/dev/null || exit 0
-if ! flock -n 9 ; then
-  exit 0
+# Устанавливаем владельца (пользователь и группа monitoring)
+chown monitoring:monitoring "$LOG_FILE" "$STATE_FILE"
+
+#Проверка процесса
+current_pid=$(pgrep -o "$PROCESS_NAME")
+
+# Если процесс не запущен — выходим без действий
+if [[ -z "$current_pid" ]]; then
+    exit 0
 fi
 
-# ищем процесс test
-CURRENT_PID="$(pgrep -x "$PROCESS_NAME" | head -n1 || true)"
-
-# если процесс не найден
-if [ -z "$CURRENT_PID" ]; then
-  rm -f "$STATE_PID_FILE"
-  exit 0
-fi
-
-# проверка на перезапуск
-PREV_PID=""
-if [ -f "$STATE_PID_FILE" ]; then
-  PREV_PID="$(cat "$STATE_PID_FILE" 2>/dev/null || true)"
-fi
-
-if [ -n "$PREV_PID" ] && [ "$PREV_PID" != "$CURRENT_PID" ]; then
-  log "INFO" "Процесс '$PROCESS_NAME' перезапущен: previous_pid=$PREV_PID current_pid=$CURRENT_PID"
-fi
-
-# сохраняем текущий PID
-echo "$CURRENT_PID" > "$STATE_PID_FILE"
-
-# запрос к API
-HTTP_CODE="$(curl --silent --show-error --fail --max-time "$CURL_TIMEOUT" \
-  -o /dev/null -w "%{http_code}" "$API_URL" 2>/dev/null || echo "000")"
-
-if [[ "$HTTP_CODE" =~ ^2 ]]; then
-   exit 0
+#Проверка предыдущего состояния
+if [[ -f "$STATE_FILE" ]]; then
+    last_pid=$(cat "$STATE_FILE")
 else
-  log "ERROR" "Мониторинг-сервер недоступен или вернул код $HTTP_CODE для $API_URL"
+    last_pid=0
 fi
 
-exit 0
+#Если PID изменился — логируем перезапуск
+if [[ "$current_pid" != "$last_pid" ]]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Process '$PROCESS_NAME' restarted (PID: $current_pid)" >> "$LOG_FILE"
+    echo "$current_pid" > "$STATE_FILE"
+fi
+
+#Проверка доступности сервера
+if ! curl -fsS -o /dev/null "$URL"; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Monitoring server not reachable: $URL" >> "$LOG_FILE"
+fi
